@@ -5,11 +5,20 @@ services:
     image: postgres:9.6
     env_file:
         - env.d/development/postgresql
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
 
   mysql:
     image: mysql:5.6
     env_file:
       - env.d/development/mysql
+    ports:
+      - "3307:3306"
+    volumes:
+      - ./data/mysqldata:/var/lib/mysql
     command: mysqld --character-set-server=utf8 --collation-server=utf8_general_ci
 
   elasticsearch:
@@ -51,3 +60,6 @@ services:
       - env.d/development/crowdin
     user: "${DOCKER_USER:-1000}"
     working_dir: /app
+
+volumes:
+    pgdata:
