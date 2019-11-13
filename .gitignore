@@ -1,0 +1,94 @@
+# env
+.env
+env.d/development/crowdin
+
+# virtualenv
+.venv
+venv
+
+# Packaging
+build
+dist
+*.egg-info
+
+# sqlite DB
+db.sqlite3
+*.db
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+
+# Site media
+/data/
+src/richie/static/richie/
+
+# Settings
+local.py
+
+# Unit test / coverage reports
+htmlcov/
+.coverage
+.cache
+.pytest_cache
+nosetests.xml
+coverage.xml
+
+# Vagrant
+.vagrant
+
+# PyCharm IDE
+.idea/
+
+# Mr Developer
+.mr.developer.cfg
+.project
+.pydevproject
+
+# Eclipse
+.settings/
+
+# Rope
+.ropeproject
+
+# Sublime-Text:
+/*.sublime-project
+/*.sublime-workspace
+
+# TextMate 2
+.tm_properties
+
+# VS Code
+.vscode
+
+# Mac Os
+.DS_Store
+
+# Temp files
+*~
+.~lock*
+
+# Swap files
+*.sw[po]
+
+# JS dependencies
+node_modules
+
+# SASS
+.sass-cache
+
+# logs
+yarn-error.log
+
+# Exported strings & generated translation templates
+src/frontend/i18n/js
+*.pot
+
+# Documentation related files to ignore
+lib/core/metadata.js
+lib/core/MetadataBlog.js
+website/translated_docs
+website/build/
+website/yarn.lock
+website/node_modules
+website/i18n/*

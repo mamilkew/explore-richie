@@ -1,0 +1,765 @@
+# Configuration file anchors
+generate-version-file: &generate-version-file
+  run:
+    name: Create a version.json
+    command: |
+      # Create a version.json à-la-mozilla
+      # https://github.com/mozilla-services/Dockerflow/blob/master/docs/version_object.md
+      printf '{"commit":"%s","version":"%s","source":"https://github.com/%s/%s","build":"%s"}\n' \
+        "$CIRCLE_SHA1" \
+        "$CIRCLE_TAG" \
+        "$CIRCLE_PROJECT_USERNAME" \
+        "$CIRCLE_PROJECT_REPONAME" \
+        "$CIRCLE_BUILD_URL" > sandbox/version.json
+
+version: 2
+jobs:
+  # Git jobs
+  # Check that the git history is clean and complies with our expectations
+  lint-git:
+    docker:
+      - image: circleci/python:3.7-stretch
+    working_directory: ~/fun
+    steps:
+      - checkout
+      # Make sure the changes don't add a "print" statement to the code base.
+      # We should exclude the ".circleci" folder from the search as the very command that checks
+      # the absence of "print" is including a "print(" itself.
+      - run:
+          name: enforce absence of print statements in code
+          command: |
+            ! git diff origin/master..HEAD -- . ':(exclude).circleci' | grep "print("
+      - run:
+          name: Check absence of fixup commits
+          command: |
+            ! git log | grep 'fixup!'
+      - run:
+          name: Install gitlint
+          command: |
+            pip install --user gitlint
+      - run:
+          name: lint commit messages added to master
+          command: |
+            ~/.local/bin/gitlint --commits origin/master..HEAD
+
+  # Check that the CHANGELOG has been updated in the current branch
+  check-changelog:
+    docker:
+      - image: circleci/buildpack-deps:stretch-scm
+    working_directory: ~/fun
+    steps:
+      - checkout
+      - run:
+          name: Check that the CHANGELOG has been modified in the current branch
+          command: |
+            git whatchanged --name-only --pretty="" origin..HEAD | grep CHANGELOG
+
+  # Check that the CHANGELOG max line length does not exceed 80 characters
+  lint-changelog:
+    docker:
+      - image: debian:stretch
+    working_directory: ~/fun
+    steps:
+      - checkout
+      - run:
+          name: Check CHANGELOG max line length
+          command: |
+            # Get the longuest line width (ignoring release links)
+            test $(cat CHANGELOG.md | grep -Ev "^\[.*\]: https://github.com/openfun" | wc -L) -le 80
+
+  # ---- Docker jobs ----
+  # Build the Docker image ready for production
+  build-docker:
+    docker:
+      - image: circleci/buildpack-deps:stretch
+    working_directory: ~/fun
+    steps:
+      # Checkout repository sources
+      - checkout
+      # Generate a version.json file describing app release
+      - <<: *generate-version-file
+      # Activate docker-in-docker (with layers caching enabled)
+      - setup_remote_docker:
+          docker_layer_caching: true
+      # Each image is tagged with the current git commit sha1 to avoid
+      # collisions in parallel builds.
+      - run:
+          name: Build production image
+          command: docker build -t richie:${CIRCLE_SHA1} --target production .
+      - run:
+          name: Check built image availability
+          command: docker images "richie:${CIRCLE_SHA1}*"
+
+  # ---- Backend jobs ----
+  # Build backend development environment
+  build-back:
+    docker:
+      - image: circleci/python:3.7-stretch
+    working_directory: ~/fun
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - v2-back-dependencies-{{ .Revision }}
+      - run:
+          name: Install development dependencies
+          command: pip install --user .[dev,sandbox]
+      - save_cache:
+          paths:
+            - ~/.local
+          key: v2-back-dependencies-{{ .Revision }}
+
+  # Build backend translations
+  build-back-i18n:
+    docker:
+      - image: circleci/python:3.7-stretch
+    working_directory: ~/fun/src/richie
+    steps:
+      - checkout:
+          path: ~/fun
+      - restore_cache:
+          keys:
+            - v2-back-dependencies-{{ .Revision }}
+      - run:
+          name: Install gettext (required to make messages)
+          command: sudo apt-get install -y gettext
+      # Generate and persist the translations base file
+      - run:
+          name: Generate a POT file from strings extracted from the project
+          command: ~/.local/bin/django-admin makemessages --keep-pot
+      - persist_to_workspace:
+          root: ~/fun
+          paths:
+            - src/richie/locale/django.pot
+
+  lint-back:
+    docker:
+      - image: circleci/python:3.7-stretch
+    working_directory: ~/fun
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - v2-back-dependencies-{{ .Revision }}
+      - run:
+          name: Lint code with flake8
+          command: ~/.local/bin/flake8
+      - run:
+          name: Lint code with isort
+          command: ~/.local/bin/isort --recursive --check-only .
+      - run:
+          name: Lint code with black
+          command: ~/.local/bin/black src/richie/apps src/richie/plugins sandbox tests --check
+      - run:
+          name: Lint code with pylint
+          command: ~/.local/bin/pylint src/richie/apps src/richie/plugins sandbox tests
+      - run:
+          name: Lint code with bandit
+          command: ~/.local/bin/bandit -qr src/richie/apps src/richie/plugins sandbox
+
+  # Restore front & back POT files containing strings to translate and upload them to our
+  # translation management tool
+  upload-i18n-strings:
+    docker:
+      - image: fundocker/crowdin:2.0.31
+    working_directory: ~/fun
+    steps:
+      - checkout
+      - attach_workspace:
+          at: ~/fun
+      - run:
+          name: upload files to crowdin
+          command: crowdin -c crowdin/config.yml upload sources
+
+  test-back-mysql:
+    docker:
+      - image: circleci/python:3.7-stretch
+        environment:
+          DJANGO_SETTINGS_MODULE: settings
+          DJANGO_CONFIGURATION: Test
+          DJANGO_SECRET_KEY: ThisIsAnExampleKeyForTestPurposeOnly
+          PYTHONPATH: /home/circleci/fun/sandbox
+          RICHIE_ES_HOST: localhost
+          DB_ENGINE: django.db.backends.mysql
+          # The DB_HOST should match the host name and cannot be set from here
+          # where it will be escaped. See the test command instead:
+          # DB_HOST=${HOSTNAME}
+          DB_HOST:
+          DB_NAME: richie
+          DB_USER: fun
+          DB_PASSWORD: pass
+          DB_PORT: 3306
+      # services
+      - image: circleci/mysql:5.6-ram
+        environment:
+          MYSQL_ROOT_PASSWORD:
+          MYSQL_DATABASE: test_richie
+          MYSQL_USER: fun
+          MYSQL_PASSWORD: pass
+        command: mysqld --character-set-server=utf8 --collation-server=utf8_general_ci
+      - image: fundocker/openshift-elasticsearch:6.6.2
+        environment:
+          discovery.type: single-node
+    working_directory: ~/fun
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - v2-back-dependencies-{{ .Revision }}
+      # Attach the frontend production build
+      - attach_workspace:
+          at: ~/fun
+      # While running tests, we need to make the /data directory writable for
+      # the circleci user
+      - run:
+          name: Create writable /data
+          command: |
+            sudo mkdir /data && \
+            sudo chown circleci:circleci /data
+      # Run back-end (Django) test suite
+      #
+      # Nota bene:
+      #
+      # 1. to run the django test suite, we need to ensure that both MySQL and
+      #    ElasticSearch services are up and ready. To achieve this, we wrap the
+      #    pytest command execution with dockerize, a tiny tool installed in the
+      #    CircleCI image. In our case, dockerize will wait up to one minute
+      #    that both the database and elastisearch containers opened their
+      #    expected tcp port (3306 and 9200 resp.).
+      # 2. We should avoid using localhost for the DB_HOST with MySQL as the
+      #    client will try to use a local socket (_e.g._
+      #    `/var/run/mysqld/mysqld.sock`) instead of the database host and port
+      #    ¯\_(ツ)_/¯.
+      - run:
+          name: Run tests
+          command: |
+            DB_HOST=${HOSTNAME} dockerize \
+              -wait tcp://${HOSTNAME}:3306 \
+              -wait tcp://${HOSTNAME}:9200 \
+              -timeout 60s \
+                ~/.local/bin/pytest
+
+  test-back-postgresql:
+    docker:
+      - image: circleci/python:3.7-stretch
+        environment:
+          DJANGO_SETTINGS_MODULE: settings
+          DJANGO_CONFIGURATION: Test
+          DJANGO_SECRET_KEY: ThisIsAnExampleKeyForTestPurposeOnly
+          PYTHONPATH: /home/circleci/fun/sandbox
+          RICHIE_ES_HOST: localhost
+          DB_HOST: localhost
+          DB_NAME: richie
+          DB_USER: fun
+          DB_PASSWORD: pass
+          DB_PORT: 5432
+      # services
+      - image: circleci/postgres:9.6-ram
+        environment:
+          POSTGRES_DB: test_richie
+          POSTGRES_USER: fun
+          POSTGRES_PASSWORD: pass
+      - image: fundocker/openshift-elasticsearch:6.6.2
+        environment:
+          discovery.type: single-node
+    working_directory: ~/fun
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - v2-back-dependencies-{{ .Revision }}
+      # Attach the frontend production build
+      - attach_workspace:
+          at: ~/fun
+      # While running tests, we need to make the /data directory writable for
+      # the circleci user
+      - run:
+          name: Create writable /data
+          command: |
+            sudo mkdir /data && \
+            sudo chown circleci:circleci /data
+      # Run back-end (Django) test suite
+      #
+      # Nota bene: to run the django test suite, we need to ensure that both
+      # MySQL and ElasticSearch services are up and ready. To achieve this, we
+      # wrap the pytest command execution with dockerize, a tiny tool installed
+      # in the CircleCI image. In our case, dockerize will wait up to one minute
+      # that both the database and elastisearch containers opened their expected
+      # tcp port (3306 and 9200 resp.).
+      - run:
+          name: Run tests
+          command: |
+            dockerize \
+              -wait tcp://localhost:5432 \
+              -wait tcp://localhost:9200 \
+              -timeout 60s \
+                ~/.local/bin/pytest
+
+  # ---- Packaging jobs ----
+  package-back:
+    docker:
+      - image: circleci/python:3.7-stretch
+    working_directory: ~/fun
+    steps:
+      - checkout
+      # Ensure we restore frontend production builds in Richie's static
+      # directory
+      - attach_workspace:
+          at: ~/fun
+      - run:
+          name: Build python package
+          command: python setup.py sdist bdist_wheel
+      # Persist build packages to the workspace
+      - persist_to_workspace:
+          root: ~/fun
+          paths:
+            - dist
+      # Store packages as artifacts to download/test them
+      - store_artifacts:
+          path: ~/fun/dist
+
+  # Publishing to PyPI requires that:
+  #   * you already registered to pypi.org
+  #   * you have define both the TWINE_USERNAME & TWINE_PASSWORD secret
+  #     environment variables in CircleCI UI (with your PyPI credentials)
+  pypi:
+    docker:
+      - image: circleci/python:3.7-stretch
+    working_directory: ~/fun
+    steps:
+      - checkout
+      # Restore built python packages
+      - attach_workspace:
+          at: ~/fun
+      - run:
+          name: List built packages
+          command: ls dist/*
+      - run:
+          name: Install base requirements (twine)
+          command: pip install --user .[ci]
+      - run:
+          name: Upload built packages to PyPI
+          command: ~/.local/bin/twine upload dist/*
+
+  # ---- DockerHub publication job ----
+  hub:
+    docker:
+      - image: circleci/buildpack-deps:stretch
+    working_directory: ~/fun
+    steps:
+      # Checkout repository sources
+      - checkout
+      # Generate a version.json file describing app release
+      - <<: *generate-version-file
+      # Activate docker-in-docker (with layers caching enabled)
+      - setup_remote_docker:
+          docker_layer_caching: true
+      - run:
+          name: Build production image (using cached layers)
+          command: docker build -t richie:${CIRCLE_SHA1} --target production .
+      - run:
+          name: Check built images availability
+          command: docker images "richie:${CIRCLE_SHA1}*"
+      # Login to DockerHub to Publish new images
+      #
+      # Nota bene: you'll need to define the following secrets environment vars
+      # in CircleCI interface:
+      #
+      #   - DOCKER_USER
+      #   - DOCKER_PASS
+      - run:
+          name: Login to DockerHub
+          command: echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+      # Tag docker images with the same pattern used in Git (Semantic Versioning)
+      #
+      # Git tag: v1.0.1
+      # Docker tag: 1.0.1(-ci)
+      - run:
+          name: Tag images
+          command: |
+            docker images fundocker/richie
+            DOCKER_TAG=$([[ -z "$CIRCLE_TAG" ]] && echo $CIRCLE_BRANCH || echo ${CIRCLE_TAG} | sed 's/^v//')
+            RELEASE_TYPE=$([[ -z "$CIRCLE_TAG" ]] && echo "branch" || echo "tag ")
+            # Display either:
+            # - DOCKER_TAG: master (Git branch)
+            # or
+            # - DOCKER_TAG: 1.1.2 (Git tag v1.1.2)
+            echo "DOCKER_TAG: ${DOCKER_TAG} (Git ${RELEASE_TYPE}${CIRCLE_TAG})"
+            docker tag richie:${CIRCLE_SHA1} fundocker/richie:${DOCKER_TAG}
+            if [[ -n "$CIRCLE_TAG" ]]; then
+                docker tag richie:${CIRCLE_SHA1} fundocker/richie:latest
+            fi
+            docker images | grep -E "^fundocker/richie\s*(${DOCKER_TAG}.*|latest|master)"
+
+      # Publish images to DockerHub
+      #
+      # Nota bene: logged user (see "Login to DockerHub" step) must have write
+      # permission for the project's repository; this also implies that the
+      # DockerHub repository already exists.
+      - run:
+          name: Publish images
+          command: |
+            DOCKER_TAG=$([[ -z "$CIRCLE_TAG" ]] && echo $CIRCLE_BRANCH || echo ${CIRCLE_TAG} | sed 's/^v//')
+            RELEASE_TYPE=$([[ -z "$CIRCLE_TAG" ]] && echo "branch" || echo "tag ")
+            # Display either:
+            # - DOCKER_TAG: master (Git branch)
+            # or
+            # - DOCKER_TAG: 1.1.2 (Git tag v1.1.2)
+            echo "DOCKER_TAG: ${DOCKER_TAG} (Git ${RELEASE_TYPE}${CIRCLE_TAG})"
+            docker push fundocker/richie:${DOCKER_TAG}
+            if [[ -n "$CIRCLE_TAG" ]]; then
+              docker push fundocker/richie:latest
+            fi
+
+  # ---- Front-end jobs ----
+  build-front:
+    docker:
+      - image: circleci/node:10
+    working_directory: ~/fun/src/frontend
+    steps:
+      - checkout:
+          path: ~/fun
+      - restore_cache:
+          keys:
+            - v5-front-dependencies-{{ checksum "yarn.lock" }}
+            - v5-front-dependencies-
+      # If the yarn.lock file is not up-to-date with the package.json file,
+      # using the --frozen-lockfile should fail.
+      - run:
+          name: Install front-end dependencies
+          command: yarn install --frozen-lockfile
+      - run:
+          name: Build front-end application
+          command: yarn build
+      - run:
+          name: Build application styles
+          command: yarn sass
+      - run:
+          name: Use react-intl-po to generate our frontend.pot file
+          command: yarn generate-l10n-template
+      - persist_to_workspace:
+          root: ~/fun
+          paths:
+            - src/frontend/i18n/frontend.pot
+      - save_cache:
+          paths:
+            - ./node_modules
+          key: v5-front-dependencies-{{ checksum "yarn.lock" }}
+
+  build-front-production:
+    docker:
+      - image: circleci/node:10
+    working_directory: ~/fun/src/frontend
+    steps:
+      - checkout:
+          path: ~/fun
+      - restore_cache:
+          keys:
+            - v5-front-dependencies-{{ checksum "yarn.lock" }}
+            - v5-front-dependencies-
+      - run:
+          name: Build front-end application in production mode
+          command: yarn build-production
+      - run:
+          name: Build application styles in production mode
+          command: yarn sass-production
+      - run:
+          name: List builds
+          command: |
+            echo "== Javascript =="
+            ls ../richie/static/richie/js/*.js
+            echo "== CSS =="
+            ls ../richie/static/richie/css/*.css
+      - persist_to_workspace:
+          root: ~/fun
+          paths:
+            - src/richie/static/richie/js/*.js
+            - src/richie/static/richie/css/*.css
+
+  lint-front:
+    docker:
+      - image: circleci/node:10
+    working_directory: ~/fun/src/frontend
+    steps:
+      - checkout:
+          path: ~/fun
+      - restore_cache:
+          keys:
+            - v5-front-dependencies-{{ checksum "yarn.lock" }}
+      - run:
+          name: Lint code with tslint
+          command: yarn lint
+      - run:
+          name: Lint JS/TS/JSON and CSS/SCSS code with prettier
+          command: yarn prettier --list-different "js/**/*.+(ts|tsx|json|js|jsx)" "*.+(ts|tsx|json|js|jsx)" "**/*.+(css|scss)"
+
+  test-front:
+    docker:
+      - image: circleci/node:10
+    working_directory: ~/fun/src/frontend
+    steps:
+      - checkout:
+          path: ~/fun
+      - restore_cache:
+          keys:
+            - v5-front-dependencies-{{ checksum "yarn.lock" }}
+      - run:
+          name: Run tests
+          # Circle CI needs the tests to be ran sequentially, otherwise it hangs. See Jest docs below:
+          # (https://jestjs.io/docs/en/troubleshooting#tests-are-extremely-slow-on-docker-and-or-continuous-integration-ci-server)
+          command: yarn test --runInBand
+
+  test-front-package:
+    docker:
+      - image: circleci/node:10
+    working_directory: ~/wrk
+    steps:
+      - checkout:
+          path: ~/fun
+      - run:
+          name: Check SCSS library
+          command: |
+            # Install the sass library/compiler
+            yarn add node-sass
+            # Install the package locally
+            yarn add file:/home/circleci/fun/src/frontend
+            # Create a scss file to compile that imports the package main entry
+            echo -e "@import 'richie-education/scss/main';\n" > main.scss
+            # Compile it!
+            yarn node-sass --include-path node_modules main.scss main.css
+
+  # Publishing to npm requires that you have define the NPM_TOKEN secret
+  # environment variables in CircleCI UI (with your PyPI credentials)
+  npm:
+    docker:
+      - image: circleci/node:10
+    working_directory: ~/fun
+    steps:
+      - checkout:
+          path: ~/fun
+      - run:
+          name: Authenticate with registry
+          command: echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/fun/.npmrc
+      - run:
+          name: Publish package
+          command: npm publish src/frontend
+
+  # ---- Documentation website jobs ----
+
+  # check if documentation version is missing
+  check-documentation-version:
+    docker:
+      - image: busybox:1.31.0
+    working_directory: ~/fun
+    steps:
+      - checkout
+      - run:
+          name: Check if the documentation version exists for the current richie version
+          command: |
+            BACKEND_VERSION=$(cat setup.cfg | grep "version" | cut -d" " -f3 | cut -d"." -f1,2)
+            echo "richie version: ${BACKEND_VERSION}"
+            cat website/versions.json | grep "${BACKEND_VERSION}"
+
+
+  # Deploy the docs website to GitHub pages.
+  deploy-website:
+    docker:
+      - image: circleci/node:10
+    working_directory: ~/fun
+    steps:
+      - checkout
+      - run:
+          name: Deploying to GitHub Pages
+          command: |
+            git config --global user.email "funmoocbot@users.noreply.github.com"
+            git config --global user.name "FUN MOOC Bot"
+            echo "machine github.com login funmoocbot password ${GH_TOKEN}" > ~/.netrc
+            cd ./website && yarn install && GIT_USER=funmoocbot yarn run publish-gh-pages
+
+workflows:
+  version: 2
+
+  richie:
+    jobs:
+      # Front-end jobs
+      #
+      # Build, lint and test the front-end apps
+      - build-front:
+          filters:
+            tags:
+              only: /.*/
+      - build-front-production:
+          requires:
+            - build-front
+          filters:
+            tags:
+              only: /.*/
+      - lint-front:
+          requires:
+            - build-front
+          filters:
+            tags:
+              only: /.*/
+      - test-front:
+          requires:
+            - lint-front
+          filters:
+            tags:
+              only: /.*/
+      - test-front-package:
+          requires:
+            - lint-front
+          filters:
+            tags:
+              only: /.*/
+
+      # Git jobs
+      #
+      # Check validity of git history
+      - lint-git:
+          filters:
+            tags:
+              only: /.*/
+      # Check CHANGELOG update
+      - check-changelog:
+          filters:
+            branches:
+              ignore: master
+            tags:
+              only: /(?!^v).*/
+      - lint-changelog:
+          filters:
+            branches:
+              ignore: master
+            tags:
+              only: /.*/
+
+      # Docker jobs
+      #
+      # Build images
+      - build-docker:
+          filters:
+            tags:
+              only: /.*/
+
+      # Backend jobs
+      #
+      # Build, lint and test production and development Docker images
+      # (debian-based)
+      - build-back:
+          filters:
+            tags:
+              only: /.*/
+      - lint-back:
+          requires:
+            - build-back
+          filters:
+            tags:
+              only: /.*/
+      - test-back-mysql:
+          requires:
+            - build-back
+            - build-front-production
+          filters:
+            tags:
+              only: /.*/
+      - test-back-postgresql:
+          requires:
+            - build-back
+            - build-front-production
+          filters:
+            tags:
+              only: /.*/
+
+      # i18n jobs
+      #
+      # Extract strings and upload them to our translation management SaaS
+      - build-back-i18n:
+          requires:
+            - build-back
+          filters:
+            tags:
+              only: /.*/
+      - upload-i18n-strings:
+          requires:
+            - build-front
+            - build-back-i18n
+          filters:
+            branches:
+              only: master
+
+      # Packaging: python
+      #
+      # Build the python package
+      - package-back:
+          requires:
+            - test-front
+            - test-back-mysql
+            - test-back-postgresql
+            - build-front-production
+          filters:
+            tags:
+              only: /.*/
+
+      # DockerHub publication.
+      #
+      # Publish docker images only if all build, lint and test jobs succeed
+      # and it has been tagged with a tag starting with the letter v or is on
+      # the master branch
+      - hub:
+          requires:
+            - build-docker
+            - test-front
+            - test-back-mysql
+            - test-back-postgresql
+          filters:
+            branches:
+              only: master
+            tags:
+              only: /^v.*/
+
+      # PyPI publication.
+      #
+      # Publish python package to PYPI only if all build, lint and test jobs
+      # succeed and it has been tagged with a tag starting with the letter v
+      - pypi:
+          requires:
+            - package-back
+          filters:
+            branches:
+              ignore: /.*/
+            tags:
+              only: /^v.*/
+
+      # NPM publication.
+      #
+      # Publish frontend package to NPM only if all build, lint and test jobs
+      # succeed and it has been tagged with a tag starting with the letter v
+      - npm:
+          requires:
+            - lint-front
+            - test-front
+            - test-front-package
+          filters:
+            branches:
+              ignore: /.*/
+            tags:
+              only: /^v.*/
+
+      # Documentation website jobs.
+      #
+      # Check on each PR if the documentation corresponding richie version
+      # is present. If not the build will fail before publishing a new release.
+      - check-documentation-version:
+          filters:
+            tags:
+              only: /.*/
+      # Publish the documentation website to GitHub Pages.
+      # Only do it for master as tagged releases are supposed to tag their own version of the
+      # documentation in the release commit on master before they go out.
+      - deploy-website:
+          requires:
+            - check-documentation-version
+          filters:
+            branches:
+              only: master

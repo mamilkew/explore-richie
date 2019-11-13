@@ -1,0 +1,31 @@
+{% extends "richie/base.html" %}
+{% load cms_tags i18n search_tags static %}
+{% get_current_language as LANGUAGE_CODE %}
+
+{% block meta %}
+  {% if CDN_DOMAIN %}
+  <meta name="public-path" value="{{ CDN_DOMAIN }}" />
+  {% endif %}
+{% endblock meta %}
+
+{% block head_title %}{% page_attribute "page_title" %}{% endblock head_title %}
+
+{% block breadcrumbs %}{% endblock breadcrumbs %}
+
+{# Enable flex on the `.body-content` so children can grow to occupy the available vertical space #}
+{% block bodycontent_classes %}body-content--flex-mode{% endblock bodycontent_classes %}
+
+{% block content %}
+  <div class="search-template">
+    <div class="search-template__content">
+      {% with header_level=2 %}
+        {% placeholder "content" %}
+      {% endwith %}
+      <div
+        class="richie-react richie-react--search"
+        data-locale="{{ LANGUAGE_CODE|react_locale }}"
+        data-props='{"pageTitle": "{% page_attribute "page_title" %}", "context": { "assets": { "icons": "{% static 'richie/icons.svg' %}" } }}'
+      ></div>
+    </div>
+  </div>
+{% endblock content %}

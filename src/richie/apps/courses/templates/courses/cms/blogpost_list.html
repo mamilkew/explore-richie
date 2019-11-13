@@ -1,0 +1,25 @@
+{% extends "richie/fullwidth.html" %}
+{% load cms_tags i18n pagination_tags %}
+
+{% block breadcrumbs %}{% endblock breadcrumbs %}
+
+{% block content %}
+<div class="blogpost-glimpse-list">
+  <h1 class="blogpost-glimpse-list__title">{{ current_page.get_title }}</h1>
+
+  {% autopaginate current_page.get_child_pages 20 as object_list %}
+  {% for page in object_list %}
+    {% if page.blogpost %}
+      {% include "courses/cms/fragment_blogpost_glimpse.html" with blogpost=page.blogpost %}
+    {% endif %}
+  {% empty %}
+    <p class="blogpost-glimpse blogpost-glimpse--empty">
+    {% trans "No associated blogposts" %}
+    </p>
+  {% endfor %}
+
+  {% if object_list %}
+    {% paginate using "richie/pagination.html" %}
+  {% endif %}
+</div>
+{% endblock content %}

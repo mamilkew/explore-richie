@@ -1,0 +1,53 @@
+version: "3.4"
+
+services:
+  postgresql:
+    image: postgres:9.6
+    env_file:
+        - env.d/development/postgresql
+
+  mysql:
+    image: mysql:5.6
+    env_file:
+      - env.d/development/mysql
+    command: mysqld --character-set-server=utf8 --collation-server=utf8_general_ci
+
+  elasticsearch:
+    image: fundocker/openshift-elasticsearch:6.6.2
+
+  app:
+    build:
+      context: .
+      target: development
+      args:
+        DOCKER_USER: ${DOCKER_USER:-1000}
+    image: richie:development
+    env_file:
+        - env.d/development/common
+        - env.d/development/${DB_HOST:-postgresql}
+    ports:
+        - "8070:8000"
+    volumes:
+      - .:/app
+      - ./data/static:/data/static
+      - ./data/media:/data/media
+      - ./data/smedia:/data/smedia
+    depends_on:
+      - "${DB_HOST:-postgresql}"
+      - "elasticsearch"
+
+  node:
+    image: circleci/node:10
+    working_dir: /app/src/frontend
+    user: "${DOCKER_USER:-1000}"
+    volumes:
+      - .:/app
+
+  crowdin:
+    image: fundocker/crowdin:2.0.27
+    volumes:
+      - ".:/app"
+    env_file:
+      - env.d/development/crowdin
+    user: "${DOCKER_USER:-1000}"
+    working_dir: /app

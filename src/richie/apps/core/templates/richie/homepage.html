@@ -1,0 +1,18 @@
+{% extends "richie/base.html" %}
+{% load cms_tags %}
+
+{% block breadcrumbs %}{% endblock breadcrumbs %}
+
+{% block meta_opengraph_contextuals %}
+    {% page_attribute "page_title" as page_title %}
+    <meta property="og:title" content="{{ page_title|truncatechars:65 }}">
+    <meta property="og:url" content="{{ SITE.web_url }}">
+{% endblock meta_opengraph_contextuals %}
+
+{% block head_title %}
+    {% page_attribute "page_title" %}
+{% endblock head_title %}
+
+{% block content %}
+    {% placeholder "maincontent" %}
+{% endblock content %}
