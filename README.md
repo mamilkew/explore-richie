@@ -1,4 +1,6 @@
-# Richie, the best OpenSource CMS to build education portals
+#Doing some research for using Richie
+
+## Richie, the best OpenSource CMS to build education portals
 
 [![CircleCI](https://circleci.com/gh/openfun/richie/tree/master.svg?style=svg)](https://circleci.com/gh/openfun/richie/tree/master)
 
