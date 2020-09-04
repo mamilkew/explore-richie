@@ -62,7 +62,7 @@
     "jest": "24.9.0",
     "lodash-es": "4.17.15",
     "node-fetch": "2.6.0",
-    "node-sass": "4.13.0",
+    "node-sass": "4.13.1",
     "nodemon": "1.19.4",
     "prettier": "1.18.2",
     "query-string": "6.8.3",
